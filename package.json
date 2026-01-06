@@ -1,0 +1,15 @@
+{
+  "name": "snmp-traffic-poller",
+  "version": "1.0.0",
+  "description": "Simple SNMP traffic poller with SQLite storage",
+  "main": "poller.js",
+  "scripts": {
+    "start": "node poller.js",
+    "verbose": "node poller.js -v"
+  },
+  "dependencies": {
+    "net-snmp": "^3.11.2",
+    "sql.js": "^1.10.3",
+    "yaml": "^2.3.4"
+  }
+}

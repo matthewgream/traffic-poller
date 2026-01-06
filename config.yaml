@@ -1,0 +1,15 @@
+device:
+  host: 192.168.0.182
+  community: public
+  version: 2c
+  port: 161
+  timeout: 5000
+
+interfaces:
+  - index: 2
+    name: bridge
+
+settings:
+  poll_interval: 30
+  report_interval: 300
+  database: ./traffic.sqlite

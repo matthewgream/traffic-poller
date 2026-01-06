@@ -1,0 +1,16 @@
+[Unit]
+Description=Traffic Poller
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ostratakenebranna/traffic
+ExecStart=/usr/bin/node /opt/ostratakenebranna/traffic/poller.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=traffic-poller
+
+[Install]
+WantedBy=multi-user.target
