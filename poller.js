@@ -33,14 +33,14 @@ log('Loaded config from', configPath);
 
 // OID definitions
 const OIDs = {
-    ifHCInOctets:    '1.3.6.1.2.1.31.1.1.1.6',   // 64-bit in octets
-    ifHCOutOctets:   '1.3.6.1.2.1.31.1.1.1.10',  // 64-bit out octets
-    ifHCInUcastPkts: '1.3.6.1.2.1.31.1.1.1.7',   // 64-bit in packets
-    ifHCOutUcastPkts:'1.3.6.1.2.1.31.1.1.1.11',  // 64-bit out packets
-    ifInErrors:      '1.3.6.1.2.1.2.2.1.14',     // in errors
-    ifOutErrors:     '1.3.6.1.2.1.2.2.1.20',     // out errors
-    ifOperStatus:    '1.3.6.1.2.1.2.2.1.8',      // operational status
-    ifHighSpeed:     '1.3.6.1.2.1.31.1.1.1.15'   // speed in Mbps
+    ifHCInOctets:    '1.3.6.1.2.1.31.1.1.1.6',
+    ifHCOutOctets:   '1.3.6.1.2.1.31.1.1.1.10',
+    ifHCInUcastPkts: '1.3.6.1.2.1.31.1.1.1.7',
+    ifHCOutUcastPkts:'1.3.6.1.2.1.31.1.1.1.11',
+    ifInErrors:      '1.3.6.1.2.1.2.2.1.14',
+    ifOutErrors:     '1.3.6.1.2.1.2.2.1.20',
+    ifOperStatus:    '1.3.6.1.2.1.2.2.1.8',
+    ifHighSpeed:     '1.3.6.1.2.1.31.1.1.1.15'
 };
 
 // Database path
@@ -49,7 +49,7 @@ const dbPath = config.settings.database.startsWith('.')
     : config.settings.database;
 
 let db = null;
-let session = null;
+let sessions = {};
 let pollInterval = null;
 let reportInterval = null;
 
@@ -61,72 +61,72 @@ function generateReport() {
     
     const parts = [];
     
-    for (const iface of config.interfaces) {
-        // Get oldest and newest samples in the report window
-        const result = db.exec(`
-            SELECT 
-                MIN(timestamp) as t_start,
-                MAX(timestamp) as t_end,
-                MIN(in_octets) as in_start,
-                MAX(in_octets) as in_end,
-                MIN(out_octets) as out_start,
-                MAX(out_octets) as out_end,
-                MIN(in_packets) as in_pkt_start,
-                MAX(in_packets) as in_pkt_end,
-                MIN(out_packets) as out_pkt_start,
-                MAX(out_packets) as out_pkt_end,
-                MIN(in_errors) as in_err_start,
-                MAX(in_errors) as in_err_end,
-                MIN(out_errors) as out_err_start,
-                MAX(out_errors) as out_err_end
-            FROM (
-                SELECT timestamp, in_octets, out_octets, in_packets, out_packets, in_errors, out_errors
-                FROM samples 
-                WHERE interface_index = ? AND timestamp >= ?
-                ORDER BY timestamp
-            )
-        `, [iface.index, since]);
-        
-        if (result.length === 0 || !result[0].values[0][0]) {
-            parts.push(`${iface.name}=no data`);
-            continue;
+    for (const device of config.devices) {
+        for (const iface of device.interfaces) {
+            const result = db.exec(`
+                SELECT 
+                    MIN(timestamp) as t_start,
+                    MAX(timestamp) as t_end,
+                    MIN(in_octets) as in_start,
+                    MAX(in_octets) as in_end,
+                    MIN(out_octets) as out_start,
+                    MAX(out_octets) as out_end,
+                    MIN(in_packets) as in_pkt_start,
+                    MAX(in_packets) as in_pkt_end,
+                    MIN(out_packets) as out_pkt_start,
+                    MAX(out_packets) as out_pkt_end,
+                    MIN(in_errors) as in_err_start,
+                    MAX(in_errors) as in_err_end,
+                    MIN(out_errors) as out_err_start,
+                    MAX(out_errors) as out_err_end
+                FROM (
+                    SELECT timestamp, in_octets, out_octets, in_packets, out_packets, in_errors, out_errors
+                    FROM samples 
+                    WHERE device_name = ? AND interface_index = ? AND timestamp >= ?
+                    ORDER BY timestamp
+                )
+            `, [device.name, iface.index, since]);
+            
+            if (result.length === 0 || !result[0].values[0][0]) {
+                parts.push(`${device.name}/${iface.name}=no data`);
+                continue;
+            }
+            
+            const row = result[0].values[0];
+            const [t_start, t_end, in_start, in_end, out_start, out_end, 
+                   in_pkt_start, in_pkt_end, out_pkt_start, out_pkt_end,
+                   in_err_start, in_err_end, out_err_start, out_err_end] = row;
+            
+            const duration = t_end - t_start;
+            if (duration <= 0) {
+                parts.push(`${device.name}/${iface.name}=no data`);
+                continue;
+            }
+            
+            const inBytes = in_end - in_start;
+            const outBytes = out_end - out_start;
+            const inPkts = (in_pkt_end || 0) - (in_pkt_start || 0);
+            const outPkts = (out_pkt_end || 0) - (out_pkt_start || 0);
+            const newInErrors = (in_err_end || 0) - (in_err_start || 0);
+            const newOutErrors = (out_err_end || 0) - (out_err_start || 0);
+            
+            const inMbps = (inBytes * 8) / duration / 1000000;
+            const outMbps = (outBytes * 8) / duration / 1000000;
+            
+            const mins = Math.round(duration / 60);
+            let report = `${device.name}/${iface.name}=${mins}min rx:${formatBytesShort(inBytes)}(${inMbps.toFixed(2)}Mbps) tx:${formatBytesShort(outBytes)}(${outMbps.toFixed(2)}Mbps)`;
+            
+            if (newInErrors > 0 || newOutErrors > 0) {
+                report += ` ERRORS:${newInErrors}in/${newOutErrors}out`;
+            }
+            
+            parts.push(report);
         }
-        
-        const row = result[0].values[0];
-        const [t_start, t_end, in_start, in_end, out_start, out_end, 
-               in_pkt_start, in_pkt_end, out_pkt_start, out_pkt_end,
-               in_err_start, in_err_end, out_err_start, out_err_end] = row;
-        
-        const duration = t_end - t_start;
-        if (duration <= 0) {
-            parts.push(`${iface.name}=no data`);
-            continue;
-        }
-        
-        const inBytes = in_end - in_start;
-        const outBytes = out_end - out_start;
-        const inPkts = (in_pkt_end || 0) - (in_pkt_start || 0);
-        const outPkts = (out_pkt_end || 0) - (out_pkt_start || 0);
-        const newInErrors = (in_err_end || 0) - (in_err_start || 0);
-        const newOutErrors = (out_err_end || 0) - (out_err_start || 0);
-        
-        const inMbps = (inBytes * 8) / duration / 1000000;
-        const outMbps = (outBytes * 8) / duration / 1000000;
-        
-        const mins = Math.round(duration / 60);
-        let report = `${iface.name}=${mins}min rx:${formatBytesShort(inBytes)}(${inMbps.toFixed(2)}Mbps,${inPkts}pkts) tx:${formatBytesShort(outBytes)}(${outMbps.toFixed(2)}Mbps,${outPkts}pkts)`;
-        
-        if (newInErrors > 0 || newOutErrors > 0) {
-            report += ` ERRORS:${newInErrors}in/${newOutErrors}out`;
-        }
-        
-        parts.push(report);
     }
     
     console.log(new Date().toISOString(), parts.join(', '));
 }
 
-// Short format for report
 function formatBytesShort(bytes) {
     if (bytes === 0) return '0B';
     const k = 1024;
@@ -135,9 +135,7 @@ function formatBytesShort(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
 }
 
-// Initialize everything
 async function init() {
-    // Initialize SQL.js
     const SQL = await initSqlJs();
     
     // Load existing database or create new one
@@ -145,16 +143,28 @@ async function init() {
         const buffer = fs.readFileSync(dbPath);
         db = new SQL.Database(buffer);
         log('Loaded existing database:', dbPath);
+        
+        // Check for old schema (no device_name column)
+        const tableInfo = db.exec("PRAGMA table_info(samples)");
+        if (tableInfo.length > 0) {
+            const columns = tableInfo[0].values.map(row => row[1]);
+            if (!columns.includes('device_name')) {
+                console.log('Old schema detected, recreating database...');
+                db.run('DROP TABLE IF EXISTS samples');
+            }
+        }
     } else {
         db = new SQL.Database();
         log('Created new database:', dbPath);
     }
     
-    // Create tables
+    // Create tables with new schema
     db.run(`
         CREATE TABLE IF NOT EXISTS samples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp INTEGER NOT NULL,
+            device_name TEXT NOT NULL,
+            device_host TEXT NOT NULL,
             interface_index INTEGER NOT NULL,
             interface_name TEXT NOT NULL,
             in_octets INTEGER NOT NULL,
@@ -168,32 +178,29 @@ async function init() {
         )
     `);
     
-    // Add new columns if upgrading from older schema
-    try { db.run(`ALTER TABLE samples ADD COLUMN in_packets INTEGER NOT NULL DEFAULT 0`); } catch(e) {}
-    try { db.run(`ALTER TABLE samples ADD COLUMN out_packets INTEGER NOT NULL DEFAULT 0`); } catch(e) {}
-    try { db.run(`ALTER TABLE samples ADD COLUMN in_errors INTEGER NOT NULL DEFAULT 0`); } catch(e) {}
-    try { db.run(`ALTER TABLE samples ADD COLUMN out_errors INTEGER NOT NULL DEFAULT 0`); } catch(e) {}
-    
     db.run(`CREATE INDEX IF NOT EXISTS idx_samples_timestamp ON samples(timestamp)`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_samples_interface ON samples(interface_index)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_samples_device ON samples(device_name)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_samples_device_interface ON samples(device_name, interface_index)`);
     
-    // Save after schema creation
     saveDatabase();
     
-    // Create SNMP session
-    session = snmp.createSession(config.device.host, config.device.community, {
-        port: config.device.port || 161,
-        timeout: config.device.timeout || 5000,
-        version: snmp.Version2c
-    });
+    // Create SNMP sessions for each device
+    for (const device of config.devices) {
+        sessions[device.name] = snmp.createSession(device.host, device.community, {
+            port: device.port || 161,
+            timeout: device.timeout || 5000,
+            version: snmp.Version2c
+        });
+        log(`SNMP session to ${device.name} (${device.host})`);
+    }
     
-    log(`SNMP session to ${config.device.host}:${config.device.port || 161}`);
-    
-    // Start
+    // Print startup info
     console.log(`SNMP Traffic Poller started`);
-    console.log(`  Device: ${config.device.host}`);
-    console.log(`  Interfaces: ${config.interfaces.map(i => i.name).join(', ')}`);
-    console.log(`  Interval: ${config.settings.poll_interval}s`);
+    console.log(`  Devices: ${config.devices.length}`);
+    for (const device of config.devices) {
+        console.log(`    ${device.name} (${device.host}): ${device.interfaces.map(i => i.name).join(', ')}`);
+    }
+    console.log(`  Poll interval: ${config.settings.poll_interval}s`);
     console.log(`  Database: ${dbPath}`);
     if (verbose) console.log('  Verbose mode enabled');
     console.log('');
@@ -212,17 +219,15 @@ async function init() {
     }
 }
 
-// Save database to disk
 function saveDatabase() {
     const data = db.export();
     const buffer = Buffer.from(data);
     fs.writeFileSync(dbPath, buffer);
 }
 
-// Build list of OIDs to poll
-function buildOidList() {
+function buildOidList(device) {
     const oids = [];
-    for (const iface of config.interfaces) {
+    for (const iface of device.interfaces) {
         oids.push(`${OIDs.ifHCInOctets}.${iface.index}`);
         oids.push(`${OIDs.ifHCOutOctets}.${iface.index}`);
         oids.push(`${OIDs.ifHCInUcastPkts}.${iface.index}`);
@@ -235,87 +240,82 @@ function buildOidList() {
     return oids;
 }
 
-const oidList = buildOidList();
-
-// Poll function
 function poll() {
     const timestamp = Math.floor(Date.now() / 1000);
     
-    session.get(oidList, (error, varbinds) => {
-        if (error) {
-            logError('SNMP error:', error.message);
-            return;
-        }
+    for (const device of config.devices) {
+        const session = sessions[device.name];
+        const oidList = buildOidList(device);
         
-        // Parse results into per-interface data
-        const results = {};
-        
-        for (const vb of varbinds) {
-            if (snmp.isVarbindError(vb)) {
-                logError('Varbind error:', snmp.varbindError(vb));
-                continue;
+        session.get(oidList, (error, varbinds) => {
+            if (error) {
+                logError(`${device.name}: SNMP error:`, error.message);
+                return;
             }
             
-            const oid = Array.isArray(vb.oid) ? vb.oid.join('.') : vb.oid.toString();
-            const value = vb.value;
+            const results = {};
             
-            // Extract interface index from OID (last element)
-            const ifIndex = parseInt(oid.split('.').pop());
-            
-            if (!results[ifIndex]) {
-                results[ifIndex] = {};
-            }
-            
-            // Determine which metric this is
-            if (oid.startsWith(OIDs.ifHCInOctets)) {
-                results[ifIndex].inOctets = bufferToNumber(value);
-            } else if (oid.startsWith(OIDs.ifHCOutOctets)) {
-                results[ifIndex].outOctets = bufferToNumber(value);
-            } else if (oid.startsWith(OIDs.ifHCInUcastPkts)) {
-                results[ifIndex].inPackets = bufferToNumber(value);
-            } else if (oid.startsWith(OIDs.ifHCOutUcastPkts)) {
-                results[ifIndex].outPackets = bufferToNumber(value);
-            } else if (oid.startsWith(OIDs.ifInErrors)) {
-                results[ifIndex].inErrors = value;
-            } else if (oid.startsWith(OIDs.ifOutErrors)) {
-                results[ifIndex].outErrors = value;
-            } else if (oid.startsWith(OIDs.ifOperStatus)) {
-                results[ifIndex].operStatus = value;
-            } else if (oid.startsWith(OIDs.ifHighSpeed)) {
-                results[ifIndex].speedMbps = value;
-            }
-        }
-        
-        // Insert samples
-        try {
-            for (const iface of config.interfaces) {
-                const r = results[iface.index];
-                if (r && r.inOctets !== undefined && r.outOctets !== undefined) {
-                    db.run(
-                        `INSERT INTO samples (timestamp, interface_index, interface_name, in_octets, out_octets, in_packets, out_packets, in_errors, out_errors, oper_status, speed_mbps)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        [timestamp, iface.index, iface.name, r.inOctets, r.outOctets, r.inPackets || 0, r.outPackets || 0, r.inErrors || 0, r.outErrors || 0, r.operStatus || 0, r.speedMbps || 0]
-                    );
-                    
-                    let logMsg = `${iface.name}: in=${formatBytes(r.inOctets)} out=${formatBytes(r.outOctets)} pkts=${r.inPackets || 0}/${r.outPackets || 0}`;
-                    if (r.inErrors || r.outErrors) {
-                        logMsg += ` ERRORS=${r.inErrors}/${r.outErrors}`;
-                    }
-                    log(logMsg);
+            for (const vb of varbinds) {
+                if (snmp.isVarbindError(vb)) {
+                    logError(`${device.name}: Varbind error:`, snmp.varbindError(vb));
+                    continue;
+                }
+                
+                const oid = Array.isArray(vb.oid) ? vb.oid.join('.') : vb.oid.toString();
+                const value = vb.value;
+                const ifIndex = parseInt(oid.split('.').pop());
+                
+                if (!results[ifIndex]) {
+                    results[ifIndex] = {};
+                }
+                
+                if (oid.startsWith(OIDs.ifHCInOctets)) {
+                    results[ifIndex].inOctets = bufferToNumber(value);
+                } else if (oid.startsWith(OIDs.ifHCOutOctets)) {
+                    results[ifIndex].outOctets = bufferToNumber(value);
+                } else if (oid.startsWith(OIDs.ifHCInUcastPkts)) {
+                    results[ifIndex].inPackets = bufferToNumber(value);
+                } else if (oid.startsWith(OIDs.ifHCOutUcastPkts)) {
+                    results[ifIndex].outPackets = bufferToNumber(value);
+                } else if (oid.startsWith(OIDs.ifInErrors)) {
+                    results[ifIndex].inErrors = value;
+                } else if (oid.startsWith(OIDs.ifOutErrors)) {
+                    results[ifIndex].outErrors = value;
+                } else if (oid.startsWith(OIDs.ifOperStatus)) {
+                    results[ifIndex].operStatus = value;
+                } else if (oid.startsWith(OIDs.ifHighSpeed)) {
+                    results[ifIndex].speedMbps = value;
                 }
             }
             
-            // Save to disk after each poll
-            saveDatabase();
-            log(`Stored ${Object.keys(results).length} samples at ${new Date(timestamp * 1000).toISOString()}`);
-            
-        } catch (err) {
-            logError('Database error:', err.message);
-        }
-    });
+            try {
+                for (const iface of device.interfaces) {
+                    const r = results[iface.index];
+                    if (r && r.inOctets !== undefined && r.outOctets !== undefined) {
+                        db.run(
+                            `INSERT INTO samples (timestamp, device_name, device_host, interface_index, interface_name, in_octets, out_octets, in_packets, out_packets, in_errors, out_errors, oper_status, speed_mbps)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            [timestamp, device.name, device.host, iface.index, iface.name, r.inOctets, r.outOctets, r.inPackets || 0, r.outPackets || 0, r.inErrors || 0, r.outErrors || 0, r.operStatus || 0, r.speedMbps || 0]
+                        );
+                        
+                        let logMsg = `${device.name}/${iface.name}: in=${formatBytes(r.inOctets)} out=${formatBytes(r.outOctets)} pkts=${r.inPackets || 0}/${r.outPackets || 0}`;
+                        if (r.inErrors || r.outErrors) {
+                            logMsg += ` ERRORS=${r.inErrors}/${r.outErrors}`;
+                        }
+                        log(logMsg);
+                    }
+                }
+                
+                saveDatabase();
+                log(`${device.name}: Stored ${Object.keys(results).length} samples`);
+                
+            } catch (err) {
+                logError(`${device.name}: Database error:`, err.message);
+            }
+        });
+    }
 }
 
-// Convert Buffer (Counter64) to number
 function bufferToNumber(buf) {
     if (typeof buf === 'number') return buf;
     if (Buffer.isBuffer(buf)) {
@@ -332,7 +332,6 @@ function bufferToNumber(buf) {
     return 0;
 }
 
-// Format bytes for display
 function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -341,12 +340,13 @@ function formatBytes(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// Graceful shutdown
 function shutdown() {
     console.log('\nShutting down...');
     if (pollInterval) clearInterval(pollInterval);
     if (reportInterval) clearInterval(reportInterval);
-    if (session) session.close();
+    for (const name in sessions) {
+        sessions[name].close();
+    }
     if (db) {
         saveDatabase();
         db.close();
@@ -357,7 +357,6 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Start
 init().catch(err => {
     console.error('Failed to initialize:', err);
     process.exit(1);

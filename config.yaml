@@ -1,15 +1,80 @@
-device:
-  host: 192.168.0.182
-  community: public
-  version: 2c
-  port: 161
-  timeout: 5000
+# Generated config for 2 device(s)
+# 2026-01-14T23:09:53.665Z
 
-interfaces:
-  - index: 2
-    name: bridge
+devices:
+  - name: uh-sw8p4s
+    host: 192.168.0.128
+    community: public
+    interfaces:
+      - index: 1
+        name: webcam-annke_c800+i91dm
+      - index: 2
+        name: network-wifi-tplink_eap653+ax3000 (1a)
+      - index: 3
+        name: device - sorel_caleon+canbus
+      - index: 4
+        name: network-wifi-mango_mt300n+v2/media-samsung_qled+65 (1b)
+      - index: 5
+        name: device - plejd_gwy+01
+      # - index: 6
+      #   name: n/c - ether6
+      - index: 7
+        name: network-wifi-edimaxpro_cap1200
+      # - index: 8
+      #   name: n/c - ether8
+      # - index: 9
+      #   name: n/c - sfp09
+      # - index: 10
+      #   name: n/c - sfp10
+      # - index: 11
+      #   name: network-switch-mikrotik_css318+16g2s
+      # - index: 12
+      #   name: n/c - sfp12
+      # - index: 13
+      #   name: bridge
+
+  - name: uh-sw16g2s
+    host: 192.168.0.107
+    community: public
+    interfaces:
+      - index: 1
+        name: workshop-server
+      - index: 2
+        name: workshop-bench
+      # - index: 3
+      #   name: n/c 03
+      # - index: 4
+      #   name: n/c 04
+      # - index: 5
+      #   name: n/c 05
+      - index: 6
+        name: evoair_a100s+g3
+      - index: 7
+        name: thermia_calibra
+      - index: 8
+        name: badtuna-server
+      # - index: 9
+      #   name: 6a_living
+      # - index: 10
+      #   name: 6b_living
+      # - index: 11
+      #   name: 4a_office
+      # - index: 12
+      #   name: 4b_office
+      # - index: 13
+      #   name: 3a_entrance
+      # - index: 14
+      #   name: 3b_entrance
+      # - index: 15
+      #   name: 2a_allrum
+      # - index: 16
+      #   name: 2b_allrum
+      - index: 17
+        name: internet
+      # - index: 18
+      #   name: mikrotik_crs112
 
 settings:
-  poll_interval: 30
+  poll_interval: 60
   report_interval: 300
   database: ./traffic.sqlite
