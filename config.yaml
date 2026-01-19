@@ -74,6 +74,13 @@ devices:
       # - index: 18
       #   name: mikrotik_crs112
 
+  - name: st-gpen21
+    host: 192.168.0.182
+    community: public
+    interfaces:
+      - index: 1
+        name: stolpe
+
 settings:
   poll_interval: 60
   report_interval: 300
