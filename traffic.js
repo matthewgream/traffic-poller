@@ -3,11 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const initSqlJs = require('sql.js');
-const YAML = require('yaml');
+const yaml = require('yaml');
 
 const args = process.argv.slice(2);
-const summaryMode = args.includes('--summary') || args.includes('-s');
-const insightMode = args.includes('--insight') || args.includes('-i');
+const modeSummary = args.includes('--summary') || args.includes('-s');
+const modeInsight = args.includes('--insight') || args.includes('-i');
 const configPath = args.find((a) => a.endsWith('.yaml') || a.endsWith('.yml')) || path.join(__dirname, 'config.yaml');
 const filters = args.filter((a) => !a.endsWith('.yaml') && !a.endsWith('.yml') && !a.startsWith('-'));
 let intervalSecs = 5 * 60;
@@ -54,7 +54,7 @@ if (!fs.existsSync(configPath)) {
     console.error(`Config file not found: ${configPath}`);
     process.exit(1);
 }
-const config = YAML.parse(fs.readFileSync(configPath, 'utf8'));
+const config = yaml.parse(fs.readFileSync(configPath, 'utf8'));
 const dbPath = config.settings.database.startsWith('.') ? path.join(__dirname, config.settings.database) : config.settings.database;
 
 const periods = [
@@ -77,8 +77,8 @@ function formatBytes(bytes) {
 }
 function formatMB(bytes) {
     if (bytes === null || bytes === undefined) return '-';
-    const mb = bytes / (1024 * 1024);
-    return mb >= 1000 ? (mb / 1024).toFixed(1) + 'G' : mb.toFixed(1) + 'M';
+    const m = bytes / (1024 * 1024);
+    return m >= 1000 ? (m / 1024).toFixed(1) + 'G' : m.toFixed(1) + 'M';
 }
 function formatRate(mbps) {
     if (mbps >= 1000) return (mbps / 1000).toFixed(1) + 'G';
@@ -94,13 +94,7 @@ function formatDateTime(ts) {
 
 function getAllInterfaces(db) {
     const result = db.exec(`SELECT DISTINCT device_name, interface_index, interface_name FROM samples ORDER BY device_name, interface_index`);
-    return result.length
-        ? result[0].values.map(([device, idx, name]) => ({
-              device,
-              index: idx,
-              name,
-          }))
-        : [];
+    return result.length ? result[0].values.map(([device, index, name]) => ({ device, index, name })) : [];
 }
 
 function filterInterfaces(items, filter) {
@@ -109,10 +103,10 @@ function filterInterfaces(items, filter) {
         const [filterDevice, filterInterface] = filter.split('/');
         return items.filter((i) => i.device.toLowerCase() === filterDevice.toLowerCase() && i.name.toLowerCase() === filterInterface.toLowerCase());
     }
-    const deviceMatches = items.filter((i) => i.device.toLowerCase() === filter.toLowerCase());
-    const interfaceMatches = items.filter((i) => i.name.toLowerCase().includes(filter.toLowerCase()));
-    if (deviceMatches.length > 0) return deviceMatches;
-    if (interfaceMatches.length > 0) return interfaceMatches;
+    const devices = items.filter((i) => i.device.toLowerCase() === filter.toLowerCase());
+    const interfaces = items.filter((i) => i.name.toLowerCase().includes(filter.toLowerCase()));
+    if (devices.length > 0) return devices;
+    if (interfaces.length > 0) return interfaces;
     return [];
 }
 
@@ -287,16 +281,15 @@ function showInsight(db, iface) {
         let line = label;
         for (let col = 0; col < plotWidth && col < slots.length; col++) {
             const slot = slots[col];
-            if (slot.rxMbps === null) {
-                line += ' ';
-                continue;
+            if (slot.rxMbps === null) line += ' ';
+            else {
+                const rxInRow = slot.rxMbps >= rowMinMbps && slot.rxMbps < rowMaxMbps;
+                const txInRow = slot.txMbps >= rowMinMbps && slot.txMbps < rowMaxMbps;
+                if (rxInRow && txInRow) line += '*';
+                else if (rxInRow) line += '-';
+                else if (txInRow) line += '+';
+                else line += ' ';
             }
-            const rxInRow = slot.rxMbps >= rowMinMbps && slot.rxMbps < rowMaxMbps;
-            const txInRow = slot.txMbps >= rowMinMbps && slot.txMbps < rowMaxMbps;
-            if (rxInRow && txInRow) line += '*';
-            else if (rxInRow) line += '-';
-            else if (txInRow) line += '+';
-            else line += ' ';
         }
         console.log(line);
     }
@@ -339,24 +332,21 @@ async function main() {
         console.error('Database not found:', dbPath);
         process.exit(1);
     }
-    const buffer = fs.readFileSync(dbPath);
-    const db = new SQL.Database(buffer);
-    const allInterfaces = getAllInterfaces(db);
-    if (!allInterfaces.length) {
+    const db = new SQL.Database(fs.readFileSync(dbPath));
+    const interfaces = getAllInterfaces(db);
+    if (!interfaces.length) {
         console.log('No data in database');
         process.exit(0);
     }
     const filter = filters[0] || null;
-    let items = filterInterfaces(allInterfaces, filter);
+    let items = filterInterfaces(interfaces, filter);
     if (!items.length) {
-        const devices = [...new Set(allInterfaces.map((i) => i.device))];
-        const interfaces = [...new Set(allInterfaces.map((i) => i.name))];
         console.error(`Filter '${filter}' not found.`);
-        console.error(`  Devices: ${devices.join(', ')}`);
-        console.error(`  Interfaces: ${interfaces.join(', ')}`);
+        console.error(`  Devices: ${[...new Set(interfaces.map((i) => i.device))].join(', ')}`);
+        console.error(`  Interfaces: ${[...new Set(interfaces.map((i) => i.name))].join(', ')}`);
         process.exit(1);
     }
-    if (insightMode) {
+    if (modeInsight) {
         if (items.length > 1) {
             const exact = items.find((i) => i.name.toLowerCase() === filter.toLowerCase());
             if (exact) items = [exact];
@@ -367,7 +357,7 @@ async function main() {
             }
         }
         showInsight(db, items[0]);
-    } else if (summaryMode) {
+    } else if (modeSummary) {
         showSummary(db, items);
     } else {
         showDetailed(db, items);

@@ -11,11 +11,11 @@ devices:
       - index: 2
         name: network-wifi-tplink_eap653+ax3000 (1a)
       - index: 3
-        name: device - sorel_caleon+canbus
+        name: device-sorel_caleon+canbus
       - index: 4
         name: network-wifi-mango_mt300n+v2/media-samsung_qled+65 (1b)
       - index: 5
-        name: device - plejd_gwy+01
+        name: device-plejd_gwy+01
       # - index: 6
       #   name: n/c - ether6
       - index: 7
