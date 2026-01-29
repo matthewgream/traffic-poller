@@ -8,6 +8,7 @@ const yaml = require('yaml');
 const args = process.argv.slice(2);
 const modeSummary = args.includes('--summary') || args.includes('-s');
 const modeInsight = args.includes('--insight') || args.includes('-i');
+const modeHourly = args.includes('--hourly') || args.includes('-H');
 const configPath = args.find((a) => a.endsWith('.yaml') || a.endsWith('.yml')) || path.join(__dirname, 'config.yaml');
 const filters = args.filter((a) => !a.endsWith('.yaml') && !a.endsWith('.yml') && !a.startsWith('-'));
 let intervalSecs = 5 * 60;
@@ -31,6 +32,7 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  (default)      Detailed stats per interface');
     console.log('  --summary, -s  Compact table view');
     console.log('  --insight, -i  ASCII graph for single interface');
+    console.log('  --hourly, -H   Time-of-day analysis');
     console.log('');
     console.log('Options:');
     console.log('  --interval=Xm  Graph interval: 5m, 15m, 30m, 1h (insight mode)');
@@ -47,6 +49,8 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  ./traffic.js internet           # Filter to "internet"');
     console.log('  ./traffic.js internet -i        # Graph for "internet"');
     console.log('  ./traffic.js internet -i --1h   # Graph with 1h intervals');
+    console.log('  ./traffic.js -H                 # Hourly summary all interfaces');
+    console.log('  ./traffic.js internet -H        # Hourly detail for "internet"');
     process.exit(0);
 }
 
@@ -83,6 +87,12 @@ function formatMB(bytes) {
 function formatRate(mbps) {
     if (mbps >= 1000) return (mbps / 1000).toFixed(1) + 'G';
     if (mbps >= 1) return mbps.toFixed(1) + 'M';
+    return (mbps * 1000).toFixed(0) + 'K';
+}
+function formatRateShort(mbps) {
+    if (mbps >= 100) return Math.round(mbps).toString();
+    if (mbps >= 10) return mbps.toFixed(1);
+    if (mbps >= 1) return mbps.toFixed(2);
     return (mbps * 1000).toFixed(0) + 'K';
 }
 function formatTime(ts) {
@@ -143,6 +153,161 @@ function getTraffic(db, device, ifaceIndex, since) {
         errors: (in_err_end || 0) - (in_err_start || 0) + ((out_err_end || 0) - (out_err_start || 0)),
         duration,
     };
+}
+
+function getHourlyRates(db, device, ifaceIndex) {
+    const result = db.exec(
+        `SELECT timestamp, in_octets, out_octets
+         FROM samples
+         WHERE device_name = ? AND interface_index = ?
+         ORDER BY timestamp`,
+        [device, ifaceIndex]
+    );
+    if (!result.length || result[0].values.length < 2) return null;
+    const rows = result[0].values;
+    const hourlyRates = {};
+    for (let h = 0; h < 24; h++) hourlyRates[h] = { rx: [], tx: [] };
+    for (let i = 1; i < rows.length; i++) {
+        const [t1, in1, out1] = rows[i - 1];
+        const [t2, in2, out2] = rows[i];
+        const duration = t2 - t1;
+        if (duration <= 0 || duration > 600) continue; // Skip gaps > 10min
+        const rxBytes = in2 - in1;
+        const txBytes = out2 - out1;
+        if (rxBytes < 0 || txBytes < 0) continue; // Counter reset
+        const rxMbps = (rxBytes * 8) / duration / 1000000;
+        const txMbps = (txBytes * 8) / duration / 1000000;
+        const midpoint = (t1 + t2) / 2;
+        const hour = new Date(midpoint * 1000).getHours();
+        hourlyRates[hour].rx.push(rxMbps);
+        hourlyRates[hour].tx.push(txMbps);
+    }
+    return hourlyRates;
+}
+
+function percentile(sorted, p) {
+    if (sorted.length === 0) return 0;
+    const idx = (p / 100) * (sorted.length - 1);
+    const lower = Math.floor(idx);
+    const upper = Math.ceil(idx);
+    if (lower === upper) return sorted[lower];
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (idx - lower);
+}
+
+function calcStats(values) {
+    if (!values || values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const n = values.length;
+    const mean = values.reduce((a, b) => a + b, 0) / n;
+    const min = sorted[0];
+    const max = sorted[n - 1];
+    const p50 = percentile(sorted, 50);
+    const p95 = percentile(sorted, 95);
+    const p99 = percentile(sorted, 99);
+    if (n === 1) return { mean, ci: 0, stddev: 0, n, min, max, p50, p95, p99 };
+    const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / (n - 1);
+    const stddev = Math.sqrt(variance);
+    const tValues = { 2: 12.71, 3: 4.3, 4: 3.18, 5: 2.78, 6: 2.57, 7: 2.45, 8: 2.36, 9: 2.31, 10: 2.26, 15: 2.13, 20: 2.09, 30: 2.04 };
+    let t = 1.96;
+    for (const [df, tv] of Object.entries(tValues))
+        if (n - 1 <= parseInt(df)) {
+            t = tv;
+            break;
+        }
+    const ci = t * (stddev / Math.sqrt(n));
+    return { mean, ci, stddev, n, min, max, p50, p95, p99 };
+}
+
+function pad(str, len, right = false) {
+    str = String(str);
+    return right ? str.padEnd(len) : str.padStart(len);
+}
+
+function showHourlySummary(db, items) {
+    const colWidth = 7;
+    const nameWidth = 30;
+    let header = 'Interface'.padEnd(nameWidth) + '│';
+    for (let h = 0; h < 24; h++) header += pad(h.toString().padStart(2, '0'), colWidth);
+    console.log('\n=== HOURLY TRAFFIC (avg Mbps rx/tx) ===\n');
+    console.log(header);
+    console.log('─'.repeat(nameWidth) + '┼' + '─'.repeat(24 * colWidth));
+    for (const item of items) {
+        const rates = getHourlyRates(db, item.device, item.index);
+        if (!rates) continue;
+        let line = `${item.device}/${item.name}`.substring(0, nameWidth - 1).padEnd(nameWidth) + '│';
+        for (let h = 0; h < 24; h++) {
+            const rxStats = calcStats(rates[h].rx);
+            const txStats = calcStats(rates[h].tx);
+            if (!rxStats || rxStats.n < 3) line += pad('-', colWidth);
+            else line += pad(formatRateShort(rxStats.mean + txStats.mean), colWidth);
+        }
+        console.log(line);
+    }
+    console.log('');
+}
+
+function showHourlyDetailed(db, iface) {
+    const rates = getHourlyRates(db, iface.device, iface.index);
+    if (!rates) {
+        console.log(`No data for ${iface.device}/${iface.name}`);
+        return;
+    }
+
+    let maxP95 = 0;
+    for (let h = 0; h < 24; h++) {
+        const rxStats = calcStats(rates[h].rx);
+        const txStats = calcStats(rates[h].tx);
+        if (rxStats && rxStats.n >= 3) maxP95 = Math.max(maxP95, rxStats.p95);
+        if (txStats && txStats.n >= 3) maxP95 = Math.max(maxP95, txStats.p95);
+    }
+    if (maxP95 === 0) maxP95 = 1;
+
+    console.log(`\n=== HOURLY TRAFFIC: ${iface.device}/${iface.name} ===\n`);
+    console.log('RX (Download) - Mbps');
+    console.log('Hour  │   N   │   p50 │   p95 │   p99 │   Max │ Histogram');
+    console.log('──────┼───────┼───────┼───────┼───────┼───────┼' + '─'.repeat(30));
+    for (let h = 0; h < 24; h++) {
+        const s = calcStats(rates[h].rx);
+        const hourStr = h.toString().padStart(2, '0') + ':00';
+        if (!s || s.n < 3) console.log(`${pad(hourStr, 5, true)} │     - │     - │     - │     - │     - │`);
+        else
+            console.log(
+                `${pad(hourStr, 5, true)} │ ` +
+                    `${pad(s.n, 5)} │ ` +
+                    `${pad(s.p50.toFixed(2), 5)} │ ` +
+                    `${pad(s.p95.toFixed(2), 5)} │ ` +
+                    `${pad(s.p99.toFixed(2), 5)} │ ` +
+                    `${pad(s.max.toFixed(2), 5)} │ ${'█'.repeat(Math.round((s.p95 / maxP95) * 25))}`
+            );
+    }
+    console.log('\nTX (Upload) - Mbps');
+    console.log('Hour  │   N   │   p50 │   p95 │   p99 │   Max │ Histogram');
+    console.log('──────┼───────┼───────┼───────┼───────┼───────┼' + '─'.repeat(30));
+    for (let h = 0; h < 24; h++) {
+        const s = calcStats(rates[h].tx);
+        const hourStr = h.toString().padStart(2, '0') + ':00';
+        if (!s || s.n < 3) console.log(`${pad(hourStr, 5, true)} │     - │     - │     - │     - │     - │`);
+        else
+            console.log(
+                `${pad(hourStr, 5, true)} │ ` +
+                    `${pad(s.n, 5)} │ ` +
+                    `${pad(s.p50.toFixed(2), 5)} │ ` +
+                    `${pad(s.p95.toFixed(2), 5)} │ ` +
+                    `${pad(s.p99.toFixed(2), 5)} │ ` +
+                    `${pad(s.max.toFixed(2), 5)} │ ${'█'.repeat(Math.round((s.p95 / maxP95) * 25))}`
+            );
+    }
+
+    const rxOverall = calcStats(Object.values(rates).flatMap((r) => r.rx));
+    const txOverall = calcStats(Object.values(rates).flatMap((r) => r.tx));
+    if (rxOverall && txOverall) {
+        console.log('\n' + '─'.repeat(70));
+        console.log(`Overall (${rxOverall.n} samples):`);
+        console.log(`  RX: p50=${rxOverall.p50.toFixed(2)} p95=${rxOverall.p95.toFixed(2)} p99=${rxOverall.p99.toFixed(2)} Mbps`);
+        console.log(`  TX: p50=${txOverall.p50.toFixed(2)} p95=${txOverall.p95.toFixed(2)} p99=${txOverall.p99.toFixed(2)} Mbps`);
+    }
+
+    console.log('');
 }
 
 function showSummary(db, items) {
@@ -340,13 +505,28 @@ async function main() {
     }
     const filter = filters[0] || null;
     let items = filterInterfaces(interfaces, filter);
-    if (!items.length) {
+    if (filter && !items.length) {
         console.error(`Filter '${filter}' not found.`);
         console.error(`  Devices: ${[...new Set(interfaces.map((i) => i.device))].join(', ')}`);
         console.error(`  Interfaces: ${[...new Set(interfaces.map((i) => i.name))].join(', ')}`);
         process.exit(1);
     }
-    if (modeInsight) {
+    if (!items.length) items = interfaces;
+
+    if (modeHourly) {
+        if (filter && items.length === 1) {
+            showHourlyDetailed(db, items[0]);
+        } else if (filter && items.length > 1) {
+            const exact = items.find((i) => i.name.toLowerCase() === filter.toLowerCase());
+            if (exact) {
+                showHourlyDetailed(db, exact);
+            } else {
+                showHourlySummary(db, items);
+            }
+        } else {
+            showHourlySummary(db, items);
+        }
+    } else if (modeInsight) {
         if (items.length > 1) {
             const exact = items.find((i) => i.name.toLowerCase() === filter.toLowerCase());
             if (exact) items = [exact];
